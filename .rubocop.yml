@@ -1,0 +1,47 @@
+AllCops:
+  TargetRubyVersion: 3.2
+  SuggestExtensions: false
+  NewCops: enable
+  Exclude:
+    - 'spec/**/*'
+    - 'exe/**/*'
+
+Style/StringLiterals:
+  EnforcedStyle: single_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: single_quotes
+
+Style/FrozenStringLiteralComment:
+  Enabled: true
+  EnforcedStyle: always
+
+Documentation:
+  Enabled: false
+
+Metrics/LineLength:
+  Max: 180
+
+Metrics/CyclomaticComplexity:
+  Max: 20
+
+Metrics/AbcSize:
+  Max: 36
+
+Metrics/MethodLength:
+  Max: 36
+
+Metrics/BlockLength:
+  Max: 36
+
+Metrics/PerceivedComplexity:
+  Max: 20
+
+Metrics/ParameterLists:
+  Max: 10
+
+Layout/HashAlignment:
+  Enabled: false
+  EnforcedHashRocketStyle: table
+  EnforcedColonStyle: table
+  EnforcedLastArgumentHashStyle: always_inspect

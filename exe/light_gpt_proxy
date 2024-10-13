@@ -1,0 +1,231 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+required_ruby_version = '3.1.0'
+if Gem::Version.new(RUBY_VERSION) < Gem::Version.new(required_ruby_version)
+  abort("Error: LightGPT Proxy requires Ruby version #{required_ruby_version} or higher. You are using Ruby #{RUBY_VERSION}.")
+end
+
+require 'optparse'
+require_relative '../lib/light_gpt_proxy'
+require 'pry'
+
+class Object
+  def presence
+    self unless blank?
+  end
+
+  def blank?
+    respond_to?(:empty?) ? !!empty? : !self
+  end
+end
+
+options = {
+  dir: Dir.home,
+  password: ENV['LIGHT_GPT_PROXY_PASSWORD'].presence,
+  providers: LightGptProxy::Templates.names || [],
+  verbose: false,
+  port: ENV['LIGHT_GPT_PROXY_PORT'].presence,
+}
+
+option_parser = OptionParser.new do |opts|
+  opts.banner = 'Usage: light_gpt_proxy [command] [options]'
+
+  opts.on('-p', '--port PORT', Integer, 'Set the port for the LightGPT Proxy server') do |port|
+    options[:port] = port.presence || ENV['LIGHT_GPT_PROXY_PORT'].presence
+  end
+
+  opts.on('-d', '--directory DIR', String, 'Set the directory where configuration file will be generated') do |dir|
+    raise OptionParser::InvalidOption, "Directory #{dir} does not exist" unless Dir.exist?(dir)
+
+    options[:dir] = dir
+  end
+
+  opts.on('-c', '--current', String, "Set the current directory (#{Dir.pwd}) where configuration file will be generated") do
+    options[:dir] = Dir.pwd
+  end
+
+  opts.on('-v', '--verbose', String, 'Enable verbose logging') do
+    options[:verbose] = true
+  end
+
+  opts.on('-s', '--specific x,y,z', Array, 'Specify providers (comma or space-separated)') do |values|
+    unless (values - LightGptProxy::Templates.names).empty?
+      raise OptionParser::InvalidOption,
+            "Invalid provider(s) #{values.join(', ')} only #{LightGptProxy::Templates.names.join(',')} are available"
+    end
+
+    options[:providers] = values
+  end
+
+  opts.on('-e', '--encrypt VALUE', String, 'Encrypted via password') do |value|
+    options[:password] = value.presence || ENV['LIGHT_GPT_PROXY_PASSWORD'].presence
+  end
+
+  opts.on('-f', '--force', String, 'Force start the server (kill existing process)') do
+    options[:force] = true
+  end
+
+  opts.on('--help', '-h', 'Show this help message') do
+    puts <<-HELP
+  Usage: light_gpt_proxy [command]
+  Commands:
+    start        Start the LightGPT Proxy server (uses config file for settings)
+                 -p or --port PORT to specify a port
+                 ENV as LIGHT_GPT_PROXY_PORT to specify a port
+                 -f or --force to force start the server (kill existing process)
+
+    stop         Stop the LightGPT Proxy server
+
+    gen          Generate a new configuration file
+                 -d or --directory DIR to specify a directory
+                 -c or --current to use the current directory
+                 -s or --specified x,y,z specify a providers to use
+                 -p or --port PORT to specify a port
+                 -e or --encrypted PASSWORD to encrypt the configuration file with a password
+                 ENV as LIGHT_GPT_PROXY_PASSWORD to encrypt the configuration file with a password
+
+    encrypt      Encrypt the configuration file
+                 -e or --encrypt PASSWORD to encrypt the configuration file with a password
+                 ENV as LIGHT_GPT_PROXY_PASSWORD to encrypt the configuration file with a password
+
+    decrypt      Decrypt the configuration file
+                 -e or --encrypted PASSWORD to decrypt the configuration file with a password
+                 ENV as LIGHT_GPT_PROXY_PASSWORD to decrypt the configuration file with a password
+
+    --info       Show current configuration settings
+    --help, -h   Show this help message
+    HELP
+    exit
+  end
+
+  opts.on('--info', 'Show current configuration settings') do
+    puts 'LightGPT Proxy Configuration:'
+    puts "Port: #{LightGptProxy.default_port}"
+    puts "Default Provider: #{LightGptProxy.default_provider}"
+    puts "Verbose Logging: #{LightGptProxy.verbose}"
+    puts "Configuration File: #{LightGptProxy.config? ? LightGptProxy.config_path : 'missing'}"
+    exit
+  end
+end
+
+begin
+  option_parser.parse!
+rescue OptionParser::InvalidOption => e
+  puts e.message
+  puts option_parser
+  exit 1
+end
+
+command = ARGV.shift
+
+pid_file = File.join(Dir.home, 'light_gpt_proxy.pid')
+
+case command
+when 'start'
+  if File.exist?(pid_file)
+    puts 'LightGPT Proxy is already running.'
+    if options[:force]
+      puts 'Force starting the server...'
+      pid = File.read(pid_file).to_i
+      Process.kill('TERM', pid) rescue nil
+      File.delete(pid_file)
+    else
+      exit 1
+    end
+  end
+  pid = fork do
+    puts "Starting LightGPT Proxy on port #{options[:port] || LightGptProxy::DEFAULT_PORT }..."
+    File.write(pid_file, Process.pid) # Write the PID to the file
+    LightGptProxy.start(port: options[:port], password: options[:password], verbose: options[:verbose])
+  end
+  Process.detach(pid)
+  puts "LightGPT Proxy started with PID #{pid}. PID file created at #{pid_file}"
+when 'stop'
+  if !File.exist?(pid_file)
+    puts 'LightGPT Proxy is not running (PID file missing).'
+    exit 1
+  end
+
+  pid = File.read(pid_file).to_i
+  if pid.zero?
+    puts 'Invalid PID in the PID file.'
+    exit 1
+  end
+
+  Process.kill('TERM', pid) rescue nil
+  File.delete(pid_file)
+  puts 'LightGPT Proxy stopped and PID file removed.'
+when 'gen'
+  puts "Generating a new configuration file #{LightGptProxy::CONFIG_FILE} in #{options[:dir]}..."
+  puts "Options: #{options.to_json}"
+  provider_names = options[:providers].empty? ? LightGptProxy::Templates.names : options[:providers]
+  providers = provider_names.to_h { |name| [name, LightGptProxy::Templates.template(name)] }
+
+  config = {
+    'default_port' => options[:port],
+    'default_provider' => provider_names.first,
+    'providers' => {}
+  }
+
+  providers.each do |name, provider|
+    props = {}
+    puts "Provider: #{provider.name}"
+    if provider.required.empty?
+      puts 'No required fields for this provider.'
+    else
+      puts 'Please provide the following information:'
+      provider.required.each do |key|
+        print "  provide #{key}: "
+        value = $stdin.gets.chomp
+        props[key] = value.strip
+      end
+      puts 'Optional fields (as empty value use `_`):'
+      provider.optional.each do |key, value|
+        print "  Provide #{key} (optional)\n  default is [#{value.to_s || 'nil'}]\n  use _ for #{key} as default: "
+        result = $stdin.gets.chomp.strip
+        props[key] = result == '_' ? value : result
+      end
+      config['providers'][name] = provider.new(**props).to_h
+    end
+
+    path = if options[:password].presence
+             File.join(options[:dir], LightGptProxy::ENCRYPTED_CONFIG_FILE).tap do |path|
+               LightGptProxy.guard(options[:password]).encode(config, path)
+             end
+           else
+             File.join(options[:dir], LightGptProxy::CONFIG_FILE).tap do |path|
+               File.write(path, config.to_yaml)
+             end
+           end
+    puts "\nConfiguration file generated at #{path}"
+  end
+when 'encrypt'
+  raise OptionParser::InvalidOption, 'No configuration file found' unless LightGptProxy.config?
+  raise OptionParser::InvalidOption, 'Configuration file found already encrypted' if LightGptProxy.encrypted_config?
+
+  password = options[:password].presence || ENV['LIGHT_GPT_PROXY_PASSWORD'].presence
+  raise OptionParser::InvalidOption, 'No password provided' unless password
+
+  path = File.join(Dir.home, LightGptProxy::ENCRYPTED_CONFIG_FILE)
+  LightGptProxy.guard(password).encode(LightGptProxy.config.data.to_h, path)
+  puts "Configuration file encrypted at #{path}"
+  File.delete(LightGptProxy.config_path)
+  puts "Old configuration file destroyed at #{LightGptProxy.config_path}"
+when 'decrypt'
+  raise OptionParser::InvalidOption, 'No configuration file found' unless LightGptProxy.config?
+  raise OptionParser::InvalidOption, 'No configuration file found' unless LightGptProxy.encrypted_config?
+
+  LightGptProxy.passwd = options[:password].presence || ENV['LIGHT_GPT_PROXY_PASSWORD'].presence
+  raise OptionParser::InvalidOption, 'No password provided' unless LightGptProxy.passwd
+
+  path = LightGptProxy.config_path.gsub(LightGptProxy::ENCRYPTED_CONFIG_FILE, LightGptProxy::CONFIG_FILE)
+  File.write(path, LightGptProxy.config.data.to_h.to_yaml)
+  puts "Configuration file decrypted at #{path}"
+  File.delete(LightGptProxy.config_path)
+  puts "Old configuration file destroyed at #{LightGptProxy.config_path}"
+else
+  puts 'Unknown command. Run `light_gpt_proxy --help` for usage.'
+  puts option_parser
+  exit 1
+end
